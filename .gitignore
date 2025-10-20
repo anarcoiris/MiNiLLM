@@ -1,0 +1,8 @@
+__pycache__/
+.git/
+.claude
+.gitnore
+*.zip
+*.json
+*.pt
+runs/
