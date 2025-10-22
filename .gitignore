@@ -1,8 +1,15 @@
 __pycache__/
 .git/
 .claude
-.gitnore
+.gitignore
 *.zip
 *.json
 *.pt
 runs/
+data/
+dataspider/download*/
+dataspider/*.db
+*.db
+*.rar
+__pycache__
+/runs

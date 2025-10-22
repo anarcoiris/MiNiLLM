@@ -1,0 +1,24 @@
+# Async HTTP + IO
+aiohttp>=3.8.4
+aiofiles>=23.1.0
+aiosqlite>=0.18.0
+
+# HTML parsing, progress bars, text fixes
+beautifulsoup4>=4.12.2
+tqdm>=4.65.0
+ftfy>=6.1.1
+
+# PDF / image / OCR
+pdf2image>=1.16.0
+pytesseract>=0.3.10
+Pillow>=9.5.0
+PyPDF2>=3.0.1
+
+# docx reading
+python-docx>=0.8.11
+
+# language detection (optional but useful)
+langdetect>=1.0.9
+
+# optional utilities (mime-type detection, hashing, etc.)
+python-magic>=0.4.27

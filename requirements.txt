@@ -1,0 +1,39 @@
+# Mini-LLM v2 - Dependencias
+# Python >= 3.10
+
+# Deep Learning Core
+# Para Windows con CUDA 11.8:
+torch>=2.0.0; sys_platform != 'win32'
+torch>=2.0.0+cu118; sys_platform == 'win32'
+numpy>=1.21.0,<2.0.0  # Pin para compatibilidad
+
+# Tokenization
+tokenizers>=0.13.0,<0.20.0
+
+# Text Processing
+ftfy>=6.1.0; extra == 'corpus'
+
+# CLI & Logging
+rich>=13.0.0
+
+# Development (opcional)
+pytest>=7.0.0; extra == 'dev'
+black>=23.0.0; extra == 'dev'
+flake8>=6.0.0; extra == 'dev'
+
+# Windows-specific
+colorama>=0.4.0; sys_platform == 'win32'
+
+# Notes:
+# - torch: Framework principal. Instalar con CUDA si tienes GPU:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118
+# 
+# - tokenizers: HuggingFace tokenizers para BPE
+# 
+# - ftfy: Limpieza de texto (solo necesario para prepare-corpus)
+#   Si no lo necesitas, comenta esta línea
+# 
+# - rich: CLI con colores y progreso (mejora UX)
+#
+# Instalación:
+#   pip install -r requirements.txt

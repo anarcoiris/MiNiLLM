@@ -1,0 +1,1382 @@
+#!/usr/bin/env python3
+"""
+interactive_pipeline.py
+
+CLI interactivo guiado para Mini-LLM con pipeline completo:
+1. Preparación de corpus
+2. Análisis de corpus
+3. Entrenamiento de tokenizer
+4. Entrenamiento de modelo
+5. Generación de texto
+6. Evaluación
+
+Uso:
+    py -3.10 interactive_pipeline.py
+"""
+
+import sys
+import subprocess
+from pathlib import Path
+from typing import Optional, Dict, Any, List
+import json
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt, Confirm, IntPrompt, FloatPrompt
+from rich.table import Table
+from rich import box
+from rich.progress import Progress, SpinnerColumn, TextColumn
+
+
+console = Console()
+
+
+# ======================== Utilidades ========================
+
+def verify_main_py():
+    """Verifica que main.py sea ejecutable"""
+    if not Path('main.py').exists():
+        console.print("[red]❌ main.py no encontrado[/]")
+        return False
+    
+    # Verifica que Python pueda importar los módulos necesarios
+    try:
+        result = subprocess.run(
+            [sys.executable, '-c', 'import torch; import tokenizers'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            console.print("[red]❌ Dependencias no disponibles[/]")
+            console.print(f"[dim]{result.stderr}[/]")
+            return False
+    except subprocess.TimeoutExpired:
+        console.print("[yellow]⚠️  Verificación de dependencias tardó demasiado[/]")
+    except Exception as e:
+        console.print(f"[yellow]⚠️  No se pudo verificar dependencias: {e}[/]")
+    
+    return True
+
+def run_command(cmd: List[str], description: str = "Ejecutando comando") -> bool:
+    """Ejecuta comando con mejor manejo de errores en Windows"""
+    console.print(f"\n[bold cyan]🚀 {description}...[/]")
+    console.print(f"[dim]Comando: {' '.join(cmd)}[/]\n")
+    
+    try:
+        # En Windows, usa shell=True para mejor compatibilidad
+        if sys.platform == 'win32':
+            result = subprocess.run(
+                ' '.join(cmd),
+                shell=True,
+                check=True,
+                text=True
+            )
+        else:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=False,
+                text=True
+            )
+        
+        console.print(f"\n[bold green]✅ {description} completado[/]\n")
+        return True
+    except subprocess.CalledProcessError as e:
+        console.print(f"\n[bold red]❌ Error en {description}[/]")
+        console.print(f"[red]Código de salida: {e.returncode}[/]")
+        if hasattr(e, 'stderr') and e.stderr:
+            console.print(f"[dim]{e.stderr}[/]")
+        return False
+    except FileNotFoundError:
+        console.print(f"\n[bold red]❌ Python no encontrado[/]")
+        console.print(f"[yellow]Verifica que Python esté en el PATH[/]")
+        return False
+
+def clear_screen():
+    """Limpia la pantalla."""
+    import os
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+
+def show_header(title: str, subtitle: str = ""):
+    """Muestra header bonito."""
+    clear_screen()
+    console.print()
+    console.print(Panel.fit(
+        f"[bold cyan]{title}[/]\n[dim]{subtitle}[/]" if subtitle else f"[bold cyan]{title}[/]",
+        border_style="cyan",
+        padding=(1, 4)
+    ))
+    console.print()
+
+
+def show_menu(title: str, options: List[str], allow_back: bool = True) -> int:
+    """
+    Muestra un menú y retorna la opción seleccionada.
+    
+    Returns:
+        Índice de la opción (0-based), o -1 si elige volver
+    """
+    console.print(f"[bold yellow]{title}[/]\n")
+    
+    table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+    table.add_column("Opción", style="cyan", justify="right")
+    table.add_column("Descripción", style="white")
+    
+    for i, option in enumerate(options, 1):
+        table.add_row(f"[{i}]", option)
+    
+    if allow_back:
+        table.add_row("[0]", "[dim]← Volver[/]")
+    
+    console.print(table)
+    console.print()
+    
+    while True:
+        try:
+            choice = IntPrompt.ask(
+                "Selecciona una opción",
+                default=1 if not allow_back else 0
+            )
+            
+            if allow_back and choice == 0:
+                return -1
+            
+            if 1 <= choice <= len(options):
+                return choice - 1
+            
+            console.print("[red]❌ Opción inválida[/]")
+        except:
+            console.print("[red]❌ Por favor ingresa un número[/]")
+
+
+
+def load_config(config_file: Path) -> Dict[str, Any]:
+    """Carga configuración desde JSON."""
+    if config_file.exists():
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    return {}
+
+
+def save_config(config: Dict[str, Any], config_file: Path):
+    """Guarda configuración a JSON."""
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_file, 'w') as f:
+        json.dump(config, f, indent=2)
+
+
+# ======================== Pipeline Steps ========================
+
+class PipelineState:
+    """Estado del pipeline."""
+    
+    def __init__(self):
+        self.config_file = Path('pipeline_config.json')
+        self.config = load_config(self.config_file)
+        
+        # Valores por defecto
+        self.defaults = {
+            'corpus_raw': 'corpus_raw.txt',
+            'corpus_clean': 'corpus_clean.txt',
+            'tokenizer': 'tokenizer.json',
+            'vocab_size': 32000,
+            'block_size': 256,
+            'separator': '<|doc|>',
+            'output_dir': 'runs/experiment',
+            'epochs': 20,
+            'batch_size': 32,
+            'lr': 5e-4,
+            'model_size': 'small'
+        }
+        
+        # Merge con config existente
+        for key, value in self.defaults.items():
+            if key not in self.config:
+                self.config[key] = value
+    
+    def save(self):
+        """Guarda estado actual."""
+        save_config(self.config, self.config_file)
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Obtiene valor de configuración."""
+        return self.config.get(key, default)
+    
+    def set(self, key: str, value: Any):
+        """Establece valor de configuración."""
+        self.config[key] = value
+        self.save()
+
+
+def step_prepare_corpus(state: PipelineState):
+    """Paso 1: Preparar corpus."""
+    show_header(
+        "📝 PASO 1: PREPARACIÓN DE CORPUS",
+        "Limpia y normaliza el texto de entrenamiento"
+    )
+    
+    # Input file
+    console.print("[bold]Archivo de entrada[/]")
+    input_file = Prompt.ask(
+        "Ruta al corpus crudo",
+        default=state.get('corpus_raw')
+    )
+    
+    if not Path(input_file).exists():
+        console.print(f"[red]❌ Archivo no encontrado: {input_file}[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    # Output file
+    output_file = Prompt.ask(
+        "Ruta para corpus limpio",
+        default=state.get('corpus_clean')
+    )
+    
+    # Opciones
+    console.print("\n[bold]Opciones de limpieza[/]")
+    preserve_case = Confirm.ask("¿Preservar mayúsculas?", default=False)
+    remove_control = Confirm.ask("¿Eliminar caracteres de control?", default=True)
+    
+    # Confirmar
+    console.print("\n[bold yellow]📋 Resumen:[/]")
+    console.print(f"  Input:  {input_file}")
+    console.print(f"  Output: {output_file}")
+    console.print(f"  Preservar mayúsculas: {preserve_case}")
+    console.print(f"  Eliminar control chars: {remove_control}")
+    console.print()
+    
+    if not Confirm.ask("¿Continuar?", default=True):
+        return
+    
+    # Construye comando
+    cmd = [
+        sys.executable, 'main.py', 'prepare-corpus',
+        '--input', input_file,
+        '--output', output_file
+    ]
+    
+    if preserve_case:
+        cmd.append('--preserve-case')
+    
+    if not remove_control:
+        cmd.append('--no-remove-control')
+    
+    # Ejecuta
+    if run_command(cmd, "Preparación de corpus"):
+        state.set('corpus_clean', output_file)
+        state.set('corpus_raw', input_file)
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def step_analyze_corpus(state: PipelineState):
+    """Paso 2: Analizar corpus."""
+    show_header(
+        "🔍 PASO 2: ANÁLISIS DE CORPUS",
+        "Analiza estructura y sugiere hiperparámetros"
+    )
+    
+    # Corpus file
+    corpus_file = Prompt.ask(
+        "Ruta al corpus",
+        default=state.get('corpus_clean')
+    )
+    
+    if not Path(corpus_file).exists():
+        console.print(f"[red]❌ Archivo no encontrado: {corpus_file}[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    # Separator
+    use_separator = Confirm.ask(
+        "¿Tu corpus tiene separadores de documento?",
+        default=True
+    )
+    
+    separator = None
+    if use_separator:
+        separator = Prompt.ask(
+            "Token separador",
+            default=state.get('separator', '<|doc|>')
+        )
+        state.set('separator', separator)
+    
+    # Construye comando
+    cmd = [
+        sys.executable, 'main.py', 'analyze-corpus',
+        '--corpus', corpus_file
+    ]
+    
+    if separator:
+        cmd.extend(['--separator', separator])
+    
+    # Ejecuta
+    run_command(cmd, "Análisis de corpus")
+    
+    # Permite ajustar parámetros basado en análisis
+    console.print("\n[bold yellow]💡 Basándote en el análisis, puedes ajustar:[/]")
+    
+    if Confirm.ask("¿Ajustar parámetros ahora?", default=True):
+        block_size = IntPrompt.ask(
+            "Block size (longitud de contexto)",
+            default=state.get('block_size', 256)
+        )
+        state.set('block_size', block_size)
+        
+        vocab_size = IntPrompt.ask(
+            "Vocabulary size",
+            default=state.get('vocab_size', 32000)
+        )
+        state.set('vocab_size', vocab_size)
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def step_train_tokenizer(state: PipelineState):
+    """Paso 3: Entrenar tokenizer."""
+    show_header(
+        "🔤 PASO 3: ENTRENAMIENTO DE TOKENIZER",
+        "Entrena tokenizer BPE para el corpus"
+    )
+    
+    # Corpus files
+    console.print("[bold]Archivos de entrenamiento[/]")
+    corpus_file = Prompt.ask(
+        "Corpus principal",
+        default=state.get('corpus_clean')
+    )
+    
+    if not Path(corpus_file).exists():
+        console.print(f"[red]❌ Archivo no encontrado: {corpus_file}[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    # Archivos adicionales
+    files = [corpus_file]
+    if Confirm.ask("¿Agregar más archivos?", default=False):
+        while True:
+            extra = Prompt.ask("Archivo adicional (Enter para terminar)", default="")
+            if not extra:
+                break
+            if Path(extra).exists():
+                files.append(extra)
+            else:
+                console.print(f"[yellow]⚠️  Archivo no encontrado: {extra}[/]")
+    
+    # Output
+    output_file = Prompt.ask(
+        "Archivo de salida (.json)",
+        default=state.get('tokenizer')
+    )
+    
+    # Vocab size
+    vocab_size = IntPrompt.ask(
+        "Vocabulary size",
+        default=state.get('vocab_size', 32000)
+    )
+    
+    # Resumen
+    console.print("\n[bold yellow]📋 Resumen:[/]")
+    console.print(f"  Archivos: {', '.join(files)}")
+    console.print(f"  Output: {output_file}")
+    console.print(f"  Vocab size: {vocab_size:,}")
+    console.print()
+    
+    if not Confirm.ask("¿Continuar?", default=True):
+        return
+    
+    # Comando
+    cmd = [
+        sys.executable, 'main.py', 'init-tokenizer',
+        '--files', *files,
+        '--vocab-size', str(vocab_size),
+        '--out', output_file
+    ]
+    
+    # Ejecuta
+    if run_command(cmd, "Entrenamiento de tokenizer"):
+        state.set('tokenizer', output_file)
+        state.set('vocab_size', vocab_size)
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def step_train_model(state: PipelineState):
+    """Paso 4: Entrenar modelo."""
+    show_header(
+        "🤖 PASO 4: ENTRENAMIENTO DE MODELO",
+        "Entrena el modelo de lenguaje"
+    )
+    
+    # Archivos necesarios
+    tokenizer = state.get('tokenizer')
+    corpus = state.get('corpus_clean')
+    
+    if not Path(tokenizer).exists():
+        console.print(f"[red]❌ Tokenizer no encontrado: {tokenizer}[/]")
+        console.print("[yellow]💡 Ejecuta primero el paso 3: Entrenar tokenizer[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    if not Path(corpus).exists():
+        console.print(f"[red]❌ Corpus no encontrado: {corpus}[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    # Configuración de modelo
+    console.print("[bold cyan]🏗️  Arquitectura del modelo[/]\n")
+    
+    model_configs = {
+        'small': {
+            'desc': 'Pequeño (~5M parámetros, rápido)',
+            'info': 'n_embd=256, n_layer=6, n_head=8'
+        },
+        'medium': {
+            'desc': 'Mediano (~15M parámetros, balanceado)',
+            'info': 'n_embd=384, n_layer=10, n_head=6'
+        },
+        'large': {
+            'desc': 'Grande (~40M parámetros, mejor calidad)',
+            'info': 'n_embd=512, n_layer=12, n_head=8'
+        },
+        'custom': {
+            'desc': 'Personalizado (configurar manualmente)',
+            'info': 'Define tus propios hiperparámetros'
+        }
+    }
+    
+    table = Table(show_header=True, box=box.ROUNDED)
+    table.add_column("Opción", style="cyan", justify="center")
+    table.add_column("Tamaño", style="yellow")
+    table.add_column("Descripción", style="white")
+    
+    for i, (key, config) in enumerate(model_configs.items(), 1):
+        table.add_row(f"[{i}]", key.upper(), f"{config['desc']}\n[dim]{config['info']}[/]")
+    
+    console.print(table)
+    console.print()
+    
+    choice = show_menu(
+        "Selecciona arquitectura",
+        list(model_configs.keys()),
+        allow_back=False
+    )
+    
+    config_name = list(model_configs.keys())[choice]
+    
+    # Parámetros custom
+    if config_name == 'custom':
+        console.print("\n[bold]Configuración personalizada[/]\n")
+        block_size = IntPrompt.ask("Block size", default=state.get('block_size', 256))
+        n_embd = IntPrompt.ask("Embedding dimension", default=384)
+        n_layer = IntPrompt.ask("Number of layers", default=8)
+        n_head = IntPrompt.ask("Number of heads", default=6)
+    else:
+        block_size = state.get('block_size', 256)
+        n_embd = None
+        n_layer = None
+        n_head = None
+    
+    # Parámetros de entrenamiento
+    console.print("\n[bold cyan]⚙️  Configuración de entrenamiento[/]\n")
+    
+    epochs = IntPrompt.ask("Epochs", default=state.get('epochs', 20))
+    batch_size = IntPrompt.ask("Batch size", default=state.get('batch_size', 32))
+    lr = FloatPrompt.ask("Learning rate", default=state.get('lr', 5e-4))
+    
+    # Opciones avanzadas
+    console.print()
+    if Confirm.ask("¿Configurar opciones avanzadas?", default=False):
+        weight_decay = FloatPrompt.ask("Weight decay", default=0.01)
+        warmup_steps = IntPrompt.ask("Warmup steps", default=500)
+        grad_clip = FloatPrompt.ask("Gradient clipping", default=1.0)
+        accumulation = IntPrompt.ask("Gradient accumulation steps", default=1)
+        use_rope = Confirm.ask("¿Usar RoPE (position embeddings)?", default=True)
+        use_amp = Confirm.ask("¿Usar mixed precision (AMP)?", default=True)
+    else:
+        weight_decay = 0.01
+        warmup_steps = 500
+        grad_clip = 1.0
+        accumulation = 1
+        use_rope = True
+        use_amp = True
+    
+    # Dataset config
+    console.print()
+    separator = state.get('separator')
+    if separator:
+        use_doc_aware = Confirm.ask(
+            "¿Usar dataset document-aware? (recomendado)",
+            default=True
+        )
+    else:
+        use_doc_aware = False
+    
+    # Output dir
+    output_dir = Prompt.ask(
+        "\nDirectorio de salida",
+        default=state.get('output_dir', 'runs/experiment')
+    )
+    
+    # Resume
+    resume_from = None
+    if Confirm.ask("¿Continuar desde checkpoint existente?", default=False):
+        resume_from = Prompt.ask("Ruta al checkpoint")
+        if not Path(resume_from).exists():
+            console.print("[yellow]⚠️  Checkpoint no encontrado, comenzando desde cero[/]")
+            resume_from = None
+    
+    # Resumen
+    console.print("\n" + "="*70)
+    console.print("[bold yellow]📋 RESUMEN DE CONFIGURACIÓN[/]")
+    console.print("="*70)
+    console.print(f"[cyan]Datos:[/]")
+    console.print(f"  Tokenizer:     {tokenizer}")
+    console.print(f"  Corpus:        {corpus}")
+    console.print(f"  Output dir:    {output_dir}")
+    console.print()
+    console.print(f"[cyan]Modelo:[/]")
+    console.print(f"  Arquitectura:  {config_name}")
+    console.print(f"  Block size:    {block_size}")
+    if config_name == 'custom':
+        console.print(f"  n_embd:        {n_embd}")
+        console.print(f"  n_layer:       {n_layer}")
+        console.print(f"  n_head:        {n_head}")
+    console.print()
+    console.print(f"[cyan]Entrenamiento:[/]")
+    console.print(f"  Epochs:        {epochs}")
+    console.print(f"  Batch size:    {batch_size}")
+    console.print(f"  Learning rate: {lr}")
+    console.print(f"  Weight decay:  {weight_decay}")
+    console.print(f"  Warmup steps:  {warmup_steps}")
+    console.print(f"  Grad clip:     {grad_clip}")
+    console.print(f"  Accumulation:  {accumulation}")
+    console.print(f"  Use RoPE:      {use_rope}")
+    console.print(f"  Use AMP:       {use_amp}")
+    console.print(f"  Doc-aware:     {use_doc_aware}")
+    if resume_from:
+        console.print(f"  Resume from:   {resume_from}")
+    console.print("="*70)
+    console.print()
+    
+    if not Confirm.ask("¿Iniciar entrenamiento?", default=True):
+        return
+    
+    # Construye comando
+    cmd = [
+        sys.executable, 'main.py', 'train',
+        '--tokenizer', tokenizer,
+        '--corpus', corpus,
+        '--outdir', output_dir,
+        '--config', config_name,
+        '--block-size', str(block_size),
+        '--epochs', str(epochs),
+        '--batch-size', str(batch_size),
+        '--lr', str(lr),
+        '--weight-decay', str(weight_decay),
+        '--warmup-steps', str(warmup_steps),
+        '--grad-clip', str(grad_clip),
+        '--accumulation-steps', str(accumulation)
+    ]
+    
+    if config_name == 'custom':
+        cmd.extend([
+            '--n-embd', str(n_embd),
+            '--n-layer', str(n_layer),
+            '--n-head', str(n_head)
+        ])
+    
+    if not use_rope:
+        cmd.append('--no-rope')
+    
+    if not use_amp:
+        cmd.append('--no-amp')
+    
+    if not use_doc_aware:
+        cmd.append('--simple-dataset')
+    
+    if separator:
+        cmd.extend(['--doc-separator', separator])
+    
+    if resume_from:
+        cmd.extend(['--resume', resume_from])
+    
+    # Ejecuta
+    if run_command(cmd, "Entrenamiento de modelo"):
+        state.set('output_dir', output_dir)
+        state.set('last_checkpoint', f"{output_dir}/ckpt_best.pt")
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def step_generate(state: PipelineState):
+    """Paso 5: Generar texto."""
+    show_header(
+        "✨ PASO 5: GENERACIÓN DE TEXTO",
+        "Genera texto usando el modelo entrenado"
+    )
+    
+    # Archivos necesarios
+    tokenizer = state.get('tokenizer')
+    checkpoint = state.get('last_checkpoint')
+    
+    if not checkpoint:
+        # Buscar en output_dir
+        output_dir = Path(state.get('output_dir', 'runs/experiment'))
+        if (output_dir / 'ckpt_best.pt').exists():
+            checkpoint = str(output_dir / 'ckpt_best.pt')
+        elif (output_dir / 'ckpt_last.pt').exists():
+            checkpoint = str(output_dir / 'ckpt_last.pt')
+    
+    if not tokenizer or not Path(tokenizer).exists():
+        console.print(f"[red]❌ Tokenizer no encontrado[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    checkpoint = Prompt.ask(
+        "Checkpoint del modelo",
+        default=checkpoint or "runs/experiment/ckpt_best.pt"
+    )
+    
+    if not Path(checkpoint).exists():
+        console.print(f"[red]❌ Checkpoint no encontrado: {checkpoint}[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    # Modo de generación
+    console.print("\n[bold]Modo de generación[/]\n")
+    mode = show_menu(
+        "Selecciona modo",
+        [
+            "Prompt único (interactivo)",
+            "Múltiples prompts (desde archivo)",
+            "Generación batch"
+        ],
+        allow_back=True
+    )
+    
+    if mode == -1:
+        return
+    
+    # Parámetros de generación
+    console.print("\n[bold cyan]⚙️  Parámetros de generación[/]\n")
+    
+    max_tokens = IntPrompt.ask("Tokens máximos a generar", default=100)
+    temperature = FloatPrompt.ask("Temperature (0.1-2.0)", default=0.8)
+    top_k = IntPrompt.ask("Top-k sampling", default=50)
+    top_p = FloatPrompt.ask("Top-p (nucleus) sampling", default=0.9)
+    
+    if Confirm.ask("¿Configurar opciones avanzadas?", default=False):
+        repetition_penalty = FloatPrompt.ask("Repetition penalty", default=1.0)
+        greedy = Confirm.ask("¿Usar greedy decoding? (ignora temperature)", default=False)
+        stream = Confirm.ask("¿Mostrar tokens en tiempo real (streaming)?", default=False)
+    else:
+        repetition_penalty = 1.0
+        greedy = False
+        stream = False
+    
+    # Construye comando base
+    cmd_base = [
+        sys.executable, 'main.py', 'generate',
+        '--tokenizer', tokenizer,
+        '--ckpt', checkpoint,
+        '--max-tokens', str(max_tokens),
+        '--temperature', str(temperature),
+        '--top-k', str(top_k),
+        '--top-p', str(top_p),
+        '--repetition-penalty', str(repetition_penalty)
+    ]
+    
+    if greedy:
+        cmd_base.append('--greedy')
+    
+    if stream:
+        cmd_base.append('--stream')
+    
+    # Según modo
+    if mode == 0:  # Prompt único
+        prompt = Prompt.ask("\nIngresa tu prompt")
+        
+        cmd = cmd_base + ['--prompt', prompt, '--stats']
+        
+        output_file = Prompt.ask(
+            "¿Guardar en archivo? (Enter para no guardar)",
+            default=""
+        )
+        if output_file:
+            cmd.extend(['--output', output_file])
+        
+        run_command(cmd, "Generación de texto")
+    
+    elif mode == 1:  # Múltiples prompts
+        prompt_file = Prompt.ask("Archivo con prompts (uno por línea)")
+        
+        if not Path(prompt_file).exists():
+            console.print(f"[red]❌ Archivo no encontrado: {prompt_file}[/]")
+            Prompt.ask("\nPresiona Enter para continuar")
+            return
+        
+        cmd = cmd_base + ['--prompt-file', prompt_file]
+        
+        output_file = Prompt.ask(
+            "¿Guardar resultados? (Enter para no guardar)",
+            default=""
+        )
+        if output_file:
+            cmd.extend(['--output', output_file])
+        
+        run_command(cmd, "Generación múltiple")
+    
+    elif mode == 2:  # Batch
+        prompt_file = Prompt.ask("Archivo con prompts")
+        
+        if not Path(prompt_file).exists():
+            console.print(f"[red]❌ Archivo no encontrado: {prompt_file}[/]")
+            Prompt.ask("\nPresiona Enter para continuar")
+            return
+        
+        cmd = cmd_base + [
+            '--prompt-file', prompt_file,
+            '--batch-generate'
+        ]
+        
+        output_file = Prompt.ask(
+            "¿Guardar resultados? (Enter para no guardar)",
+            default=""
+        )
+        if output_file:
+            cmd.extend(['--output', output_file])
+        
+        run_command(cmd, "Generación batch")
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def step_evaluate(state: PipelineState):
+    """Paso 6: Evaluar modelo."""
+    show_header(
+        "📊 PASO 6: EVALUACIÓN DE MODELO",
+        "Calcula perplexity y otras métricas"
+    )
+    
+    # Archivos necesarios
+    tokenizer = state.get('tokenizer')
+    checkpoint = state.get('last_checkpoint')
+    
+    if not checkpoint:
+        output_dir = Path(state.get('output_dir', 'runs/experiment'))
+        if (output_dir / 'ckpt_best.pt').exists():
+            checkpoint = str(output_dir / 'ckpt_best.pt')
+        elif (output_dir / 'ckpt_last.pt').exists():
+            checkpoint = str(output_dir / 'ckpt_last.pt')
+    
+    if not tokenizer or not Path(tokenizer).exists():
+        console.print(f"[red]❌ Tokenizer no encontrado[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    checkpoint = Prompt.ask(
+        "Checkpoint del modelo",
+        default=checkpoint or "runs/experiment/ckpt_best.pt"
+    )
+    
+    if not Path(checkpoint).exists():
+        console.print(f"[red]❌ Checkpoint no encontrado: {checkpoint}[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    # Modo de evaluación
+    console.print("\n[bold]Datos de test[/]\n")
+    mode = show_menu(
+        "Selecciona fuente",
+        [
+            "Archivo con múltiples textos",
+            "Texto único (escribir ahora)"
+        ],
+        allow_back=True
+    )
+    
+    if mode == -1:
+        return
+    
+    # Construye comando
+    cmd = [
+        sys.executable, 'main.py', 'evaluate',
+        '--tokenizer', tokenizer,
+        '--ckpt', checkpoint
+    ]
+    
+    if mode == 0:  # Archivo
+        test_file = Prompt.ask("Archivo con textos de test")
+        
+        if not Path(test_file).exists():
+            console.print(f"[red]❌ Archivo no encontrado: {test_file}[/]")
+            Prompt.ask("\nPresiona Enter para continuar")
+            return
+        
+        cmd.extend(['--test-file', test_file])
+    
+    elif mode == 1:  # Texto único
+        test_text = Prompt.ask("Texto a evaluar")
+        cmd.extend(['--test-text', test_text])
+    
+    # Ejecuta
+    run_command(cmd, "Evaluación de modelo")
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+# ======================== Menú Principal ========================
+
+def main_menu(state: PipelineState):
+    """Menú principal interactivo."""
+    
+    while True:
+        show_header(
+            "🚀 MINI-LLM - PIPELINE INTERACTIVO",
+            "CLI guiado para entrenar modelos de lenguaje"
+        )
+        
+        # Mostrar estado actual
+        console.print("[bold]📁 Estado del proyecto:[/]\n")
+        
+        status_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+        status_table.add_column("Item", style="cyan")
+        status_table.add_column("Estado", style="white")
+        
+        # Corpus
+        corpus_clean = state.get('corpus_clean')
+        corpus_status = "✅" if corpus_clean and Path(corpus_clean).exists() else "❌"
+        status_table.add_row(
+            "Corpus limpio",
+            f"{corpus_status} {corpus_clean if corpus_clean else '[dim]No configurado[/]'}"
+        )
+        
+        # Tokenizer
+        tokenizer = state.get('tokenizer')
+        tok_status = "✅" if tokenizer and Path(tokenizer).exists() else "❌"
+        status_table.add_row(
+            "Tokenizer",
+            f"{tok_status} {tokenizer if tokenizer else '[dim]No entrenado[/]'}"
+        )
+        
+        # Modelo
+        checkpoint = state.get('last_checkpoint')
+        model_status = "✅" if checkpoint and Path(checkpoint).exists() else "❌"
+        status_table.add_row(
+            "Modelo entrenado",
+            f"{model_status} {checkpoint if checkpoint else '[dim]No entrenado[/]'}"
+        )
+        
+        console.print(status_table)
+        console.print()
+        
+        # Menú de opciones
+        options = [
+            "📝 Preparar corpus (limpieza y normalización)",
+            "🔍 Analizar corpus (estadísticas y sugerencias)",
+            "🔤 Entrenar tokenizer (BPE)",
+            "🤖 Entrenar modelo",
+            "✨ Generar texto",
+            "📊 Evaluar modelo (perplexity)",
+            "⚙️  Configuración avanzada",
+            "📖 Ver documentación/ayuda",
+            "🔄 Ejecutar pipeline completo (automático)",
+            "🗑️  Limpiar configuración",
+        ]
+        
+        choice = show_menu("¿Qué deseas hacer?", options, allow_back=False)
+        
+        if choice == -1 or choice == 10:  # Salir
+            console.print("\n[bold cyan]👋 ¡Hasta luego![/]\n")
+            break
+        
+        # Ejecutar opción seleccionada
+        if choice == 0:
+            step_prepare_corpus(state)
+        elif choice == 1:
+            step_analyze_corpus(state)
+        elif choice == 2:
+            step_train_tokenizer(state)
+        elif choice == 3:
+            step_train_model(state)
+        elif choice == 4:
+            step_generate(state)
+        elif choice == 5:
+            step_evaluate(state)
+        elif choice == 6:
+            advanced_config(state)
+        elif choice == 7:
+            show_help()
+        elif choice == 8:
+            run_full_pipeline(state)
+        elif choice == 9:
+            clean_config(state)
+
+
+def advanced_config(state: PipelineState):
+    """Configuración avanzada."""
+    show_header(
+        "⚙️  CONFIGURACIÓN AVANZADA",
+        "Ajusta parámetros por defecto del pipeline"
+    )
+    
+    console.print("[bold yellow]Configuración actual:[/]\n")
+    
+    config_table = Table(show_header=True, box=box.ROUNDED)
+    config_table.add_column("Parámetro", style="cyan")
+    config_table.add_column("Valor actual", style="white")
+    
+    important_keys = [
+        'corpus_raw', 'corpus_clean', 'tokenizer', 'vocab_size',
+        'block_size', 'separator', 'output_dir', 'epochs',
+        'batch_size', 'lr', 'model_size'
+    ]
+    
+    for key in important_keys:
+        value = state.get(key, '[dim]No configurado[/]')
+        config_table.add_row(key, str(value))
+    
+    console.print(config_table)
+    console.print()
+    
+    if Confirm.ask("¿Modificar configuración?", default=True):
+        console.print("\n[dim]Deja en blanco para mantener valor actual[/]\n")
+        
+        # Vocabulario
+        vocab_size = Prompt.ask(
+            f"Vocabulary size [{state.get('vocab_size', 32000)}]",
+            default=""
+        )
+        if vocab_size:
+            state.set('vocab_size', int(vocab_size))
+        
+        # Block size
+        block_size = Prompt.ask(
+            f"Block size [{state.get('block_size', 256)}]",
+            default=""
+        )
+        if block_size:
+            state.set('block_size', int(block_size))
+        
+        # Separator
+        separator = Prompt.ask(
+            f"Separador de documentos [{state.get('separator', '<|doc|>')}]",
+            default=""
+        )
+        if separator:
+            state.set('separator', separator)
+        
+        # Epochs
+        epochs = Prompt.ask(
+            f"Epochs por defecto [{state.get('epochs', 20)}]",
+            default=""
+        )
+        if epochs:
+            state.set('epochs', int(epochs))
+        
+        # Batch size
+        batch_size = Prompt.ask(
+            f"Batch size [{state.get('batch_size', 32)}]",
+            default=""
+        )
+        if batch_size:
+            state.set('batch_size', int(batch_size))
+        
+        # Learning rate
+        lr = Prompt.ask(
+            f"Learning rate [{state.get('lr', 5e-4)}]",
+            default=""
+        )
+        if lr:
+            state.set('lr', float(lr))
+        
+        # Output dir
+        output_dir = Prompt.ask(
+            f"Directorio de salida [{state.get('output_dir', 'runs/experiment')}]",
+            default=""
+        )
+        if output_dir:
+            state.set('output_dir', output_dir)
+        
+        console.print("\n[green]✅ Configuración actualizada[/]")
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def show_help():
+    """Muestra documentación y ayuda."""
+    show_header(
+        "📖 DOCUMENTACIÓN Y AYUDA",
+        "Guía rápida del pipeline"
+    )
+    
+    help_text = """
+[bold cyan]🎯 WORKFLOW RECOMENDADO:[/]
+
+[bold]1. Preparar corpus[/]
+   - Limpia y normaliza tu archivo de texto
+   - Elimina caracteres problemáticos
+   - Opcional: convierte a minúsculas
+
+[bold]2. Analizar corpus[/]
+   - Obtén estadísticas sobre tus datos
+   - Recibe sugerencias de hiperparámetros
+   - Decide block_size y vocab_size óptimos
+
+[bold]3. Entrenar tokenizer[/]
+   - Crea un tokenizer BPE específico para tu corpus
+   - Define el tamaño de vocabulario (16k-64k típicamente)
+   - Incluye tokens especiales si los necesitas
+
+[bold]4. Entrenar modelo[/]
+   - Elige arquitectura (small/medium/large/custom)
+   - Configura hiperparámetros (epochs, batch_size, lr)
+   - El entrenamiento guarda checkpoints automáticamente
+
+[bold]5. Generar texto[/]
+   - Usa el mejor checkpoint (ckpt_best.pt)
+   - Experimenta con temperature y sampling
+   - Prueba diferentes prompts
+
+[bold]6. Evaluar[/]
+   - Calcula perplexity en textos de test
+   - Compara diferentes checkpoints
+   - Valida la calidad del modelo
+
+[bold cyan]💡 TIPS:[/]
+
+• [bold]Corpus pequeño (<50MB):[/] usa modelo 'small', block_size=128-256
+• [bold]Corpus mediano (50-200MB):[/] usa 'medium', block_size=256-512
+• [bold]Corpus grande (>200MB):[/] usa 'large', block_size=512-1024
+
+• [bold]Separadores de documento:[/] mejoran la calidad si tu corpus
+  tiene documentos claramente separados
+
+• [bold]Temperature:[/]
+  - 0.1-0.5: más determinístico y coherente
+  - 0.8-1.0: balanceado (recomendado)
+  - 1.5-2.0: más creativo y aleatorio
+
+• [bold]Early stopping:[/] el entrenamiento para automáticamente
+  si no hay mejora en 5 epochs
+
+[bold cyan]🔧 ARCHIVOS GENERADOS:[/]
+
+• [bold]tokenizer.json[/]: vocabulario y reglas de tokenización
+• [bold]runs/experiment/[/]:
+  - ckpt_best.pt: mejor modelo (menor val_loss)
+  - ckpt_last.pt: último checkpoint
+  - config.json: hiperparámetros usados
+  - history.json: métricas de entrenamiento
+
+[bold cyan]⚠️  SOLUCIÓN DE PROBLEMAS:[/]
+
+• [bold]"Weights only load failed"[/]:
+  Asegúrate de haber ejecutado fix_torch_load.py
+
+• [bold]"CUDA out of memory"[/]:
+  - Reduce batch_size
+  - Usa gradient checkpointing (--gradient-checkpointing)
+  - Reduce el tamaño del modelo
+
+• [bold]"Loss is NaN"[/]:
+  - Reduce learning rate (prueba 1e-4 o 1e-5)
+  - Verifica que el corpus esté bien formateado
+  - Usa gradient clipping (default: 1.0)
+
+• [bold]Generación repetitiva[/]:
+  - Aumenta temperature (prueba 1.0-1.2)
+  - Aumenta repetition_penalty (prueba 1.1-1.3)
+  - Usa top-p sampling con valores más bajos (0.8-0.9)
+"""
+    
+    console.print(help_text)
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def run_full_pipeline(state: PipelineState):
+    """Ejecuta pipeline completo automáticamente."""
+    show_header(
+        "🔄 PIPELINE COMPLETO AUTOMÁTICO",
+        "Ejecuta todos los pasos secuencialmente"
+    )
+    
+    console.print("[bold yellow]⚠️  Este proceso ejecutará:[/]\n")
+    console.print("  1. Preparar corpus")
+    console.print("  2. Analizar corpus")
+    console.print("  3. Entrenar tokenizer")
+    console.print("  4. Entrenar modelo")
+    console.print("  5. Generar ejemplos")
+    console.print()
+    console.print("[dim]Nota: Puedes configurar parámetros antes de comenzar[/]\n")
+    
+    if not Confirm.ask("¿Continuar con pipeline automático?", default=True):
+        return
+    
+    # Configuración inicial
+    console.print("\n[bold cyan]📋 Configuración inicial[/]\n")
+    
+    corpus_raw = Prompt.ask(
+        "Archivo de corpus crudo",
+        default=state.get('corpus_raw', 'corpus_raw.txt')
+    )
+    
+    if not Path(corpus_raw).exists():
+        console.print(f"[red]❌ Archivo no encontrado: {corpus_raw}[/]")
+        Prompt.ask("\nPresiona Enter para continuar")
+        return
+    
+    experiment_name = Prompt.ask(
+        "Nombre del experimento",
+        default="auto_experiment"
+    )
+    
+    output_base = Path('runs') / experiment_name
+    
+    # Configuración rápida
+    console.print("\n[bold]Configuración rápida:[/]\n")
+    
+    presets = {
+        'quick': {
+            'name': 'Rápido (prueba)',
+            'vocab': 16000,
+            'block': 128,
+            'model': 'small',
+            'epochs': 5,
+            'batch': 16
+        },
+        'balanced': {
+            'name': 'Balanceado (recomendado)',
+            'vocab': 32000,
+            'block': 256,
+            'model': 'medium',
+            'epochs': 20,
+            'batch': 32
+        },
+        'quality': {
+            'name': 'Alta calidad (lento)',
+            'vocab': 50000,
+            'block': 512,
+            'model': 'large',
+            'epochs': 30,
+            'batch': 16
+        }
+    }
+    
+    preset_choice = show_menu(
+        "Selecciona preset",
+        [p['name'] for p in presets.values()],
+        allow_back=True
+    )
+    
+    if preset_choice == -1:
+        return
+    
+    preset_key = list(presets.keys())[preset_choice]
+    preset = presets[preset_key]
+    
+    # Confirmar
+    console.print(f"\n[bold yellow]📋 Configuración seleccionada ({preset['name']}):[/]")
+    console.print(f"  Vocabulary size: {preset['vocab']:,}")
+    console.print(f"  Block size: {preset['block']}")
+    console.print(f"  Modelo: {preset['model']}")
+    console.print(f"  Epochs: {preset['epochs']}")
+    console.print(f"  Batch size: {preset['batch']}")
+    console.print(f"  Output: {output_base}")
+    console.print()
+    
+    if not Confirm.ask("¿Iniciar pipeline?", default=True):
+        return
+    
+    # Ejecutar pipeline
+    console.print("\n" + "="*70)
+    console.print("[bold cyan]🚀 INICIANDO PIPELINE AUTOMÁTICO[/]")
+    console.print("="*70 + "\n")
+    
+    steps_completed = 0
+    total_steps = 5
+    
+    # Archivos intermedios
+    corpus_clean = output_base / 'corpus_clean.txt'
+    tokenizer_file = output_base / 'tokenizer.json'
+    model_dir = output_base / 'model'
+    
+    output_base.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Paso 1: Preparar corpus
+        console.print(f"[bold cyan]📝 Paso 1/{total_steps}: Preparando corpus...[/]")
+        cmd = [
+            sys.executable, 'main.py', 'prepare-corpus',
+            '--input', corpus_raw,
+            '--output', str(corpus_clean)
+        ]
+        if not run_command(cmd, "Preparación de corpus"):
+            raise Exception("Falló preparación de corpus")
+        steps_completed += 1
+        
+        # Paso 2: Analizar corpus
+        console.print(f"\n[bold cyan]🔍 Paso 2/{total_steps}: Analizando corpus...[/]")
+        cmd = [
+            sys.executable, 'main.py', 'analyze-corpus',
+            '--corpus', str(corpus_clean)
+        ]
+        run_command(cmd, "Análisis de corpus")
+        steps_completed += 1
+        
+        # Paso 3: Entrenar tokenizer
+        console.print(f"\n[bold cyan]🔤 Paso 3/{total_steps}: Entrenando tokenizer...[/]")
+        cmd = [
+            sys.executable, 'main.py', 'init-tokenizer',
+            '--files', str(corpus_clean),
+            '--vocab-size', str(preset['vocab']),
+            '--out', str(tokenizer_file)
+        ]
+        if not run_command(cmd, "Entrenamiento de tokenizer"):
+            raise Exception("Falló entrenamiento de tokenizer")
+        steps_completed += 1
+        
+        # Paso 4: Entrenar modelo
+        console.print(f"\n[bold cyan]🤖 Paso 4/{total_steps}: Entrenando modelo...[/]")
+        console.print("[yellow]⏱️  Este paso puede tardar bastante tiempo...[/]\n")
+        cmd = [
+            sys.executable, 'main.py', 'train',
+            '--tokenizer', str(tokenizer_file),
+            '--corpus', str(corpus_clean),
+            '--outdir', str(model_dir),
+            '--config', preset['model'],
+            '--block-size', str(preset['block']),
+            '--epochs', str(preset['epochs']),
+            '--batch-size', str(preset['batch'])
+        ]
+        if not run_command(cmd, "Entrenamiento de modelo"):
+            raise Exception("Falló entrenamiento de modelo")
+        steps_completed += 1
+        
+        # Paso 5: Generar ejemplos
+        console.print(f"\n[bold cyan]✨ Paso 5/{total_steps}: Generando ejemplos...[/]")
+        
+        test_prompts = [
+            "El futuro de la inteligencia artificial",
+            "En un lugar de la Mancha",
+            "La ciencia es"
+        ]
+        
+        for i, prompt in enumerate(test_prompts, 1):
+            console.print(f"\n[bold]Ejemplo {i}: {prompt}[/]")
+            cmd = [
+                sys.executable, 'main.py', 'generate',
+                '--tokenizer', str(tokenizer_file),
+                '--ckpt', str(model_dir / 'ckpt_best.pt'),
+                '--prompt', prompt,
+                '--max-tokens', '100',
+                '--temperature', '0.8'
+            ]
+            run_command(cmd, f"Generación ejemplo {i}")
+        
+        steps_completed += 1
+        
+        # Éxito
+        console.print("\n" + "="*70)
+        console.print("[bold green]✅ PIPELINE COMPLETADO EXITOSAMENTE[/]")
+        console.print("="*70)
+        console.print(f"\n[bold cyan]📁 Archivos generados en:[/] {output_base}")
+        console.print(f"\n[bold]Próximos pasos:[/]")
+        console.print("  • Genera más texto con diferentes prompts")
+        console.print("  • Evalúa el modelo con textos de test")
+        console.print("  • Ajusta hiperparámetros y re-entrena si es necesario")
+        console.print()
+        
+        # Actualizar estado
+        state.set('corpus_clean', str(corpus_clean))
+        state.set('tokenizer', str(tokenizer_file))
+        state.set('output_dir', str(model_dir))
+        state.set('last_checkpoint', str(model_dir / 'ckpt_best.pt'))
+        
+    except Exception as e:
+        console.print("\n" + "="*70)
+        console.print("[bold red]❌ PIPELINE INTERRUMPIDO[/]")
+        console.print("="*70)
+        console.print(f"[red]Error: {e}[/]")
+        console.print(f"[yellow]Pasos completados: {steps_completed}/{total_steps}[/]")
+        console.print()
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+def clean_config(state: PipelineState):
+    """Limpia configuración guardada."""
+    show_header(
+        "🗑️  LIMPIAR CONFIGURACIÓN",
+        "Resetea la configuración guardada"
+    )
+    
+    console.print("[bold yellow]⚠️  Esto borrará:[/]\n")
+    console.print("  • Rutas de archivos guardadas")
+    console.print("  • Configuración personalizada")
+    console.print("  • Historial de experimentos")
+    console.print()
+    console.print("[dim]Nota: No borra archivos de datos o modelos[/]\n")
+    
+    if Confirm.ask("¿Confirmar limpieza?", default=False):
+        if state.config_file.exists():
+            state.config_file.unlink()
+        
+        # Resetea a valores por defecto
+        state.config = state.defaults.copy()
+        state.save()
+        
+        console.print("\n[green]✅ Configuración limpiada[/]")
+    else:
+        console.print("\n[yellow]❌ Cancelado[/]")
+    
+    Prompt.ask("\nPresiona Enter para continuar")
+
+
+# ======================== Entry Point ========================
+
+def main():
+    """Punto de entrada principal."""
+    try:
+        # Verifica que main.py existe
+        if not Path('main.py').exists():
+            console.print("[bold red]❌ Error: main.py no encontrado[/]")
+            console.print("[yellow]Ejecuta este script desde el directorio del proyecto[/]")
+            sys.exit(1)
+        
+        # Crea estado
+        state = PipelineState()
+        
+        # Banner inicial
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]🚀 MINI-LLM - PIPELINE INTERACTIVO[/]\n"
+            "[dim]Entrenamiento guiado de modelos de lenguaje[/]",
+            border_style="cyan",
+            padding=(1, 4)
+        ))
+        console.print()
+        
+        if Confirm.ask("¿Ver tutorial rápido?", default=False):
+            show_help()
+        
+        # Menú principal
+        main_menu(state)
+        
+    except KeyboardInterrupt:
+        console.print("\n\n[yellow]⚠️  Proceso interrumpido por el usuario[/]")
+        console.print("[dim]Presiona Ctrl+C nuevamente para salir[/]\n")
+    except Exception as e:
+        console.print(f"\n[bold red]❌ Error fatal: {e}[/]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/]")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

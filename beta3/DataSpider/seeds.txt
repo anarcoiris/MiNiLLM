@@ -1,0 +1,26 @@
+https://es.wikipedia.org/wiki/Historia_de_Espa%C3%B1a
+https://www.bne.es/es/Catalogos/Biblioteca-Digital-Hispanica
+https://hemerotecadigital.bne.es/
+https://pares.cultura.gob.es/
+https://digital.csic.es/
+https://www.cervantesvirtual.com/
+https://www.hispana.es/
+https://www.europeana.eu/es
+https://archive.org/details/texts
+https://bibliotecavirtualmadrid.org/
+https://www.bne.es/
+https://bibliotecadigital.jcyl.es/ (Biblioteca Digital de Castilla y León)
+https://www.bibliotecavirtualdeandalucia.es/
+https://www.bibliotecavirtualdelpaisvasco.eus/  # (si aplica)
+https://www.bibliotecavirtualdecanarias.org/
+https://www.culturaydeporte.gob.es/ (Ministerio de Cultura - portal)
+https://www.archivodelafrib.org/  # (ejemplo, revisa repositorios regionales)
+https://www.indias.cultura.gob.es/  # Archivo General de Indias (entrada)
+https://www.abc.es/archivo/
+https://hemeroteca.lavanguardia.com/
+https://www.gutenberg.org/ (Project Gutenberg - textos en dominio público)
+https://www.bibliotecavirtualmiguelcervantes.es/
+https://bdh.bne.es/ (Biblioteca Digital Hispánica alternativa)
+https://bdpi.cultura.gob.es/  # (Biblioteca Digital del Patrimonio Iberoamericano / agregadores nacionales)
+https://repositorio.uned.es/  # (repositorios universitarios españoles, a revisar)
+https://hdl.handle.net/ (usa handles de repositorios institucionales; ej. CSIC ya puesto)
