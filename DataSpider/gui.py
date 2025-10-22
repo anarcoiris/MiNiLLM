@@ -34,8 +34,7 @@ PIPELINE_SCRIPT = "main.py"
 # Plantilla seeds por defecto
 SEEDS_TEMPLATE = """# seeds.txt: URLs semilla (una por línea)
 # Ejemplos:
-https://www.bne.es/
-https://pares.cultura.gob.es/
+https://es.wikipedia.org/wiki/Historia_de_Espa%C3%B1a
 # Añade aquí tus URLs...
 """
 

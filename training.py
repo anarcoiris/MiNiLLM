@@ -481,7 +481,7 @@ def load_checkpoint(
     device: str = 'cpu'
 ) -> Dict[str, Any]:
     """Carga checkpoint."""
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)  # TORCH_LOAD_FIX_APPLIED
 
     model.load_state_dict(checkpoint['model_state_dict'])
 

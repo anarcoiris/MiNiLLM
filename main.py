@@ -50,6 +50,31 @@ from dataset import (
 from training import TrainingConfig, train, load_checkpoint
 from generation import GenerationConfig, generate, generate_batch, compute_perplexity, print_generation_stats
 
+# ======================== PyTorch 2.6+ Compatibility ========================
+# SAFE_GLOBALS_REGISTERED: Registra clases custom para torch.load
+# Esto permite cargar checkpoints con TrainingHistory de forma segura
+
+try:
+    import torch
+    from training import TrainingHistory
+    
+    # Registra TrainingHistory como clase segura
+    # Esto es la solución RECOMENDADA por PyTorch 2.6+
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        torch.serialization.add_safe_globals([TrainingHistory])
+        # También registra dataclasses si es necesario
+        import dataclasses
+        torch.serialization.add_safe_globals([dataclasses.dataclass])
+except ImportError:
+    # PyTorch < 2.6 o training no disponible aún
+    pass
+except Exception as e:
+    # No crítico si falla, usaremos weights_only=False como fallback
+    pass
+
+# ============================================================================
+
+
 # Tokenizer
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, processors
 from tokenizers.normalizers import NFKC
@@ -122,7 +147,7 @@ def validate_tokenizer(filepath: Path) -> Tokenizer:
 def validate_checkpoint(filepath: Path) -> dict:
     """Valida y carga un checkpoint."""
     try:
-        ckpt = torch.load(filepath, map_location='cpu')
+        ckpt = torch.load(filepath, map_location='cpu', weights_only=False)  # TORCH_LOAD_FIX_APPLIED
 
         # Verifica claves necesarias
         required_keys = ['model_state_dict', 'model_config']
